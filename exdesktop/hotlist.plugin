@@ -24,7 +24,7 @@ from ui.settings import Header, Divider, Selector, Input, Text
 
 __id__ = "hotlist_exd"
 __name__ = "热门消息榜"
-__version__ = "3.4"
+__version__ = "3.5"
 __author__ = "tg-hotlist"
 __description__ = (
     "按点赞量/互动量排序当前群组的热门消息。用客户端自己的会话直连读取，"
@@ -716,7 +716,7 @@ class HotlistPlugin(BasePlugin):
         by = BY_VALUES[by_i]
         ranked = sorted(rows, key=self._sort_key(by), reverse=True)[:top]
         if not ranked:
-            self._err("该时间范围内没有消息")
+            self._empty_dialog(dialog_id, days_i)
             return
         items = [
             "🔄 刷新数据（只拉新消息）",
@@ -770,6 +770,29 @@ class HotlistPlugin(BasePlugin):
                 .set_items(items, on_click) \
                 .set_positive_button("刷新", lambda b, w: on_click(b, 0)) \
                 .set_negative_button("关闭").show()
+        self._ui(build)
+
+    def _empty_dialog(self, dialog_id, days_i):
+        """当前时间范围内没有消息时，不要只弹一个错误——
+        直接让用户当场换时间范围（很多群只是近期没发言，历史里其实有）。"""
+        def on_pick(builder, which):
+            try:
+                builder.dismiss()
+            except Exception:
+                pass
+            if 0 <= which < len(DAYS_VALUES):
+                self._set_days(dialog_id, which)
+                threading.Thread(target=self._show,
+                                 args=(dialog_id, False), daemon=True).start()
+
+        def build():
+            from ui.alert import AlertDialogBuilder
+            AlertDialogBuilder() \
+                .set_title("该时间范围内没有消息") \
+                .set_message("当前范围：%s。\n\n如果这个群更早以前有过发言，选一个更长的时间范围重新扫描："
+                             % DAYS_LABELS[days_i]) \
+                .set_items(DAYS_LABELS, on_pick) \
+                .set_negative_button("取消").show()
         self._ui(build)
 
     def _pick_sort(self, dialog_id):

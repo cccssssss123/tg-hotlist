@@ -40,6 +40,8 @@ default-workspace/
 │
 ├── exdesktop/                  # exDesktop 插件（形态 B）
 │   ├── hotlist.plugin          # 插件源码（Python，exteraGram 格式）
+│   ├── setup.bat               # 一键安装（下载客户端 + 装插件 + 建快捷方式）
+│   ├── update.bat              # 一键更新（换成新版程序，保留 tdata 与插件）
 │   ├── start_all.bat           # 启动后端 + exDesktop（可选兜底）
 │   ├── start_silent_all.vbs    # 无窗口静默启动（可放开机启动）
 │   ├── README_集成exDesktop.md # 插件安装与使用
@@ -71,6 +73,11 @@ default-workspace/
 
 装完双击桌面「exDesktop 热榜」→ exDesktop 首次扫码登录 → 打开群 → 菜单 →
 「🏆 热门消息榜」即可。
+
+> **以后要升级 exDesktop**：双击 **`exdesktop/update.bat`** 即可（自动拉最新
+> portable 包、只覆盖程序文件，**保留 tdata 与插件**，不用重新扫码）。
+> exDesktop 自带的「检查更新」在便携版上常失败（它直连 GitHub API，国内网络/
+> 代理限流时就会报“无法更新”），用这个脚本最稳。
 
 > 脚本只下载官方 exDesktop，**不随仓库分发任何客户端二进制**。
 > 若下载失败，可自行到 https://github.com/metawka/exDesktop/releases 下载
@@ -195,6 +202,13 @@ cd exdesktop    && ..\tg-hotlist\.venv\Scripts\python.exe -X utf8 test_plugin.py
   是官方版本（建议表述为 "exDesktop 插件"）。
 
 ## 变更记录 / 检查点
+
+- **v1.2.3（当前检查点）**
+  - 新增 `exdesktop/update.bat` / `update.ps1`：原地升级 exDesktop
+    （只覆盖程序文件，保留 `tdata` 与插件），绕开便携版上失效的“检查更新”
+  - 插件 v3.5：**当前时间范围内没有消息时，弹窗直接让你改时间范围**
+    （最近 1 天/3 天/7 天/30 天/1 年/全部），不再只提示一句“没有消息”
+  - 已实测升级 7.4.3.1 → 7.4.3.2，登录状态与插件均保留
 
 - **v1.2.2（当前检查点）**
   - 桌面快捷方式改为**直接启动 exDesktop**，使用**原生图标与原生界面**

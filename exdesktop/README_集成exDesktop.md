@@ -24,6 +24,7 @@ exdesktop\
 │   ├── python\extera\       插件运行时 SDK
 │   └── tdata\plugins\plugins\hotlist.plugin   ← 插件已装好
 ├── hotlist.plugin           插件源文件（和上面那份相同，便于备份/改）
+├── update.bat / update.ps1  一键更新 exDesktop（保留 tdata 与插件）
 ├── start_all.bat            启动后端 + exDesktop（本地服务兜底时才用）
 ├── test_plugin.py           插件逻辑测试（21 项断言，打真实后端）
 └── README_集成exDesktop.md  本文件
@@ -45,6 +46,22 @@ exdesktop\
 > `messages.getHistory`，不需要 Python / 网页。
 > 只有切到「本地服务 8765」兜底时，才先双击 `..\tg-hotlist\run_web.bat`
 > （或用 `setup.ps1 -WithBackend` 装好后端）。
+
+### 1.5 更新 exDesktop（升级版本）
+
+exDesktop 自带的「检查更新」在便携版上经常失败——它直接请求
+`github.com/metawka/exDesktop/releases/latest`（GitHub API），
+国内网络 / 代理没被它接管 / API 限流时会报“无法更新”。
+
+用 **`update.bat`** 更新最稳：它会下载最新官方 portable 包，
+**只覆盖 `Telegram.exe` / `modules` / `python`，保留 `tdata`（登录、聊天、设置）
+与插件目录**，然后重启。旧程序会备份到 `backup_before_update\<旧版本>`。
+
+```bat
+update.bat                     :: 自动查最新版并更新
+update.bat -Version v7.4.3.2   :: 指定版本（API 被限流时）
+update.bat -ZipPath D:\x.zip   :: 用已下载的 zip
+```
 
 ### 2. 首次登录 exDesktop
 
@@ -72,6 +89,9 @@ exDesktop 是独立客户端，**数据与 AyuGram 分开**，需要单独登录
 
 切换排序/时间会**复用同一次抓取的数据在内存里重排**，几乎瞬间完成；
 只有「刷新」会重新联网扫描。
+
+> 若这个群在当前时间范围（如最近 3 天 / 本月）里没有消息，弹窗**不会只报一句错**，
+> 而是直接列出时间范围选项——选「最近 1 年 / 历史全部」再扫即可。
 
 > **重要（已经帮你设好）**：exDesktop 默认会拦截「来源不明的插件」，
 > 自写插件会被标记 `blocked: UNKNOWN_SOURCE` 而不加载。

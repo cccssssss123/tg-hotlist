@@ -113,7 +113,7 @@ loader=importlib.machinery.SourceFileLoader("hp", PLUGIN)
 spec=importlib.util.spec_from_loader("hp", loader)
 mod=importlib.util.module_from_spec(spec); loader.exec_module(mod)
 
-check("version", mod.__version__, "3.4")
+check("version", mod.__version__, "3.5")
 p=mod.HotlistPlugin(); p.on_plugin_load()
 p._settings={"source":"0","days":"1","by":"0","top":"5","limit":"3000",
              "backend":"http://127.0.0.1:1"}
@@ -277,6 +277,16 @@ check("合并取最大浏览", m_alb["views"], 90100)
 check("合并保留文字", m_alb["text"], "相册说明")
 check("合并保留反应", m_alb["reactions"], 9)
 check("单条不受影响", len([x for x in merged if x["grouped_id"] is None]), 1)
+
+# ---- 14) 空时间范围：要能让用户当场换范围，而不是只弹个错误 ----
+record["alerts"].clear()
+p._render(-100999, [], {"group": "群X", "count": 0, "all_time": False, "oldest": ""},
+          1, 0, 15, 3000, "直连")
+check("空范围弹出选择框", len(record["alerts"]), 1)
+if record["alerts"]:
+    ea = record["alerts"][0]
+    check("空范围标题提示", "没有消息" in (ea.title or ""), True)
+    check("空范围可选时间范围", ea.items == mod.DAYS_LABELS, True)
 
 print()
 print("全部通过 ✔" if FAIL==0 else f"有 {FAIL} 项失败 ✘")
