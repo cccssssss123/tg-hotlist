@@ -113,7 +113,7 @@ loader=importlib.machinery.SourceFileLoader("hp", PLUGIN)
 spec=importlib.util.spec_from_loader("hp", loader)
 mod=importlib.util.module_from_spec(spec); loader.exec_module(mod)
 
-check("version", mod.__version__, "3.5")
+check("version", mod.__version__, "3.6")
 p=mod.HotlistPlugin(); p.on_plugin_load()
 p._settings={"source":"0","days":"1","by":"0","top":"5","limit":"3000",
              "backend":"http://127.0.0.1:1"}

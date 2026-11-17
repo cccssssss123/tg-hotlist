@@ -22,7 +22,7 @@ exdesktop\
 ├── app\                     exDesktop 程序（解压好的 portable 版）
 │   ├── Telegram.exe         主程序（260 MB）
 │   ├── python\extera\       插件运行时 SDK
-│   └── tdata\plugins\plugins\hotlist.plugin   ← 插件已装好
+│   └── tdata\plugins\plugins\hotlist_exd.plugin   ← 插件已装好
 ├── hotlist.plugin           插件源文件（和上面那份相同，便于备份/改）
 ├── update.bat / update.ps1  一键更新 exDesktop（保留 tdata 与插件）
 ├── start_all.bat            启动后端 + exDesktop（本地服务兜底时才用）

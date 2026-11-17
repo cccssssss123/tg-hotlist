@@ -95,8 +95,12 @@ Step 3 "安装热榜插件"
 $PPlug = Join-Path $AppDir "tdata\plugins\plugins"
 New-Item -ItemType Directory -Path $PPlug -Force | Out-Null
 if (-not (Test-Path $Plugin)) { throw "找不到插件文件：$Plugin" }
-Copy-Item $Plugin (Join-Path $PPlug "hotlist.plugin") -Force
-Ok "插件已安装：$PPlug\hotlist.plugin"
+# exDesktop 按插件内部 id 命名文件：本插件 __id__ = hotlist_exd，
+# 因此必须装成 hotlist_exd.plugin，否则新版沙箱会把它自己的缓存目录判为“受保护路径”。
+$PluginTarget = Join-Path $PPlug "hotlist_exd.plugin"
+Copy-Item $Plugin $PluginTarget -Force
+Remove-Item (Join-Path $PPlug "hotlist.plugin") -Force -ErrorAction SilentlyContinue
+Ok "插件已安装：$PluginTarget"
 
 $cfgDir = Join-Path $AppDir "tdata"
 New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null

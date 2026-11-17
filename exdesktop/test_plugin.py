@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""插件 v3.4 测试：TL 消息解析(_row/_reactions) + 菜单 + 真实后端端到端。
+"""插件 v3.6 测试：TL 消息解析(_row/_reactions) + 菜单 + 真实后端端到端。
 无后端时自动 SKIP（供 CI 使用）。"""
 import importlib.machinery
 import importlib.util
@@ -120,7 +120,7 @@ loader=importlib.machinery.SourceFileLoader("hp", PLUGIN)
 spec=importlib.util.spec_from_loader("hp", loader)
 mod=importlib.util.module_from_spec(spec); loader.exec_module(mod)
 
-check("version", mod.__version__, "3.4")
+check("version", mod.__version__, "3.6")
 p=mod.HotlistPlugin(); p.on_plugin_load()
 check("菜单项 2 个", len(record["menu"]), 2)
 check("有聊天菜单", "CHAT_ACTION_MENU" in [m.menu_type for m in record["menu"]], True)
@@ -177,3 +177,4 @@ print("全部通过 ✔" if FAIL==0 else f"有 {FAIL} 项失败 ✘")
 try: shutil.rmtree(TMP, ignore_errors=True)
 except Exception: pass
 sys.exit(1 if FAIL else 0)
+

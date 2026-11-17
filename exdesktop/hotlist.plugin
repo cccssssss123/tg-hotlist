@@ -24,7 +24,7 @@ from ui.settings import Header, Divider, Selector, Input, Text
 
 __id__ = "hotlist_exd"
 __name__ = "热门消息榜"
-__version__ = "3.5"
+__version__ = "3.6"
 __author__ = "tg-hotlist"
 __description__ = (
     "按点赞量/互动量排序当前群组的热门消息。用客户端自己的会话直连读取，"
@@ -84,6 +84,12 @@ class HotlistPlugin(BasePlugin):
             self._db_path = self._resolve_db_path()
         except Exception:
             self._db_path = None
+        # 启动自检：确认缓存目录在当前 exDesktop 沙箱下确实可写（排障用）
+        try:
+            _c = self._db(); _c.close()
+            self.log("cache ready: %s" % (self._db_path or "<none>"))
+        except Exception as _e:
+            self.log("cache init failed: %s" % _e)
         # 一次性迁移：旧版把「弹窗里选的时间范围」写进了全局默认，导致换群沿用。
         # 这里把“新群默认”重置为「最近 3 天」，各群的旧选择不受影响（新版按群存）。
         try:
@@ -207,16 +213,36 @@ class HotlistPlugin(BasePlugin):
 
     def _resolve_db_path(self):
         import file_utils
-        d = None
+        # 新版 exDesktop 的插件沙箱只放行「文件名主干」对应的 .cache/.data/<name>。
+        # 这里把几种来源都试一遍，避免因插件文件名/内部 id 不一致而拿不到目录。
+        stem = None
         try:
-            d = file_utils.get_plugin_cache_dir()
+            fn = globals().get("__file__")
+            if fn:
+                stem = os.path.splitext(os.path.basename(str(fn)))[0]
         except Exception:
-            d = None
-        if not d:
+            stem = None
+        cands = []
+
+        def add(fn, *args):
             try:
-                d = file_utils.get_plugin_dir()
+                d = fn(*args)
+                if d:
+                    cands.append(d)
             except Exception:
-                d = None
+                pass
+
+        add(file_utils.get_plugin_cache_dir)
+        if stem:
+            add(file_utils.get_plugin_cache_dir, stem)
+        add(file_utils.get_plugin_dir)
+        if stem:
+            add(file_utils.get_plugin_dir, stem)
+        try:
+            add(file_utils.get_cache_dir)
+        except Exception:
+            pass
+        d = cands[0] if cands else None
         if not d:
             return None
         try:
