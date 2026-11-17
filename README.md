@@ -40,7 +40,7 @@ default-workspace/
 │
 ├── exdesktop/                  # exDesktop 插件（形态 B）
 │   ├── hotlist.plugin          # 插件源码（Python，exteraGram 格式）
-│   ├── start_all.bat           # 启动后端 + exDesktop
+│   ├── start_all.bat           # 启动后端 + exDesktop（可选兜底）
 │   ├── start_silent_all.vbs    # 无窗口静默启动（可放开机启动）
 │   ├── README_集成exDesktop.md # 插件安装与使用
 │   ├── 官方插件清单.txt         # exDesktop 官方插件目录（518 个）
@@ -62,12 +62,15 @@ default-workspace/
 双击 **`exdesktop/setup.bat`**，它会自动：
 
 1. 从 exDesktop 官方 Releases 下载 portable 版并解压到 `exdesktop/app`
-2. 创建 Python 虚拟环境并安装依赖（网络慢会自动换清华镜像）
-3. 安装热榜插件，并开启「允许未知来源插件」（写 `extera.json`，注意无 BOM）
-4. 创建桌面快捷方式 + 开机启动项（静默、无黑框）
+2. 安装热榜插件，并开启「允许未知来源插件」（写 `extera.json`，注意无 BOM）
+3. 创建桌面快捷方式 + 开机启动项，**直接启动 exDesktop（原生图标 / 原生界面）**
 
-装完双击桌面「启动 热榜+exDesktop」→ exDesktop 首次扫码登录 → 打开群 → 菜单 →
-「热门消息榜」即可。
+> **不需要本地后台**：插件默认走「客户端直连」（用 exDesktop 自己的登录会话发
+> MTProto），没有额外进程、没有网页跳转。只有当你想用「本地服务 8765」兜底时，
+> 才需要 Python 后端：`powershell -File exdesktop\setup.ps1 -WithBackend`。
+
+装完双击桌面「exDesktop 热榜」→ exDesktop 首次扫码登录 → 打开群 → 菜单 →
+「🏆 热门消息榜」即可。
 
 > 脚本只下载官方 exDesktop，**不随仓库分发任何客户端二进制**。
 > 若下载失败，可自行到 https://github.com/metawka/exDesktop/releases 下载
@@ -193,7 +196,14 @@ cd exdesktop    && ..\tg-hotlist\.venv\Scripts\python.exe -X utf8 test_plugin.py
 
 ## 变更记录 / 检查点
 
-- **v1.2.1（当前检查点）**
+- **v1.2.2（当前检查点）**
+  - 桌面快捷方式改为**直接启动 exDesktop**，使用**原生图标与原生界面**
+    （不再经 `wscript` 拉起后台，图标不再是空白脚本图标）
+  - 安装脚本**默认不再安装 Python 后端**：插件「客户端直连」无需后台；
+    需要「本地服务 8765」兜底时才用 `setup.ps1 -WithBackend`
+  - 首次运行自动 `Unblock-File` 去掉「来自网络」标记，减少“未知发布者”安全提示
+
+- **v1.2.1**
   - 清理文档/示例中的本机路径、账号与群组等个人标识（示例统一为占位符）
   - 测试脚本改为可移植：`test_plugin.py` 的测试群通过环境变量
     `TGHL_TEST_GROUP` 传入，仓库不写死任何真实会话

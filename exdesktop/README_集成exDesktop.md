@@ -24,12 +24,13 @@ exdesktop\
 │   ├── python\extera\       插件运行时 SDK
 │   └── tdata\plugins\plugins\hotlist.plugin   ← 插件已装好
 ├── hotlist.plugin           插件源文件（和上面那份相同，便于备份/改）
-├── start_all.bat            一键启动：后端 + exDesktop
+├── start_all.bat            启动后端 + exDesktop（本地服务兜底时才用）
 ├── test_plugin.py           插件逻辑测试（21 项断言，打真实后端）
 └── README_集成exDesktop.md  本文件
 ```
 
-配套的后端在 `..\tg-hotlist\`（`run_web.bat` / `web_app.py`）。
+配套的后端在 `..\tg-hotlist\`（`run_web.bat` / `web_app.py`），**仅作「本地服务 8765」兜底**；
+默认的「客户端直连」完全不需要它。
 
 ---
 
@@ -37,12 +38,13 @@ exdesktop\
 
 ### 1. 启动
 
-双击 `start_all.bat`。它会：
-- 先启动 tg-hotlist 本地后端（黑色小窗口，**别关**）
-- 再启动 exDesktop
+直接双击桌面「**exDesktop 热榜**」快捷方式（图标就是 exDesktop 原生图标），
+或双击 `app\Telegram.exe`。插件在客户端内加载，**不需要先开任何后台进程**。
 
-> 也可以分开手动操作：先双击 `..\tg-hotlist\run_web.bat`，
-> 再双击 `app\Telegram.exe`。
+> 数据来源默认「客户端直连」：插件用 exDesktop 自己的会话发 MTProto
+> `messages.getHistory`，不需要 Python / 网页。
+> 只有切到「本地服务 8765」兜底时，才先双击 `..\tg-hotlist\run_web.bat`
+> （或用 `setup.ps1 -WithBackend` 装好后端）。
 
 ### 2. 首次登录 exDesktop
 
