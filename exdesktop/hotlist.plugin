@@ -1,0 +1,866 @@
+# -*- coding: utf-8 -*-
+"""
+tg-hotlist · 热门消息榜（exDesktop / exteraGram 插件）v3.0
+
+数据来源：客户端直连（用 exDesktop 自己的会话发 MTProto），失败自动回退本地服务。
+本地缓存：SQLite 落盘（插件自己的目录），带**增量拉取**——
+  · 同一群看过一次后，再打开直接读缓存，秒开；
+  · 「刷新」只拉上次之后的新消息，几乎瞬间；
+  · 换更长的时间范围时，只补拉更早的部分（不会从头重扫）；
+  · 重启客户端缓存仍在。
+弹窗内可切换排序 / 时间范围 / 刷新。全程只读，不发消息、不点赞。
+"""
+
+import json
+import os
+import sqlite3
+import threading
+import time
+import urllib.error
+import urllib.request
+
+from base_plugin import BasePlugin, MenuItemData, MenuItemType
+from ui.settings import Header, Divider, Selector, Input, Text
+
+__id__ = "hotlist_exd"
+__name__ = "热门消息榜"
+__version__ = "3.4"
+__author__ = "tg-hotlist"
+__description__ = (
+    "按点赞量/互动量排序当前群组的热门消息。用客户端自己的会话直连读取，"
+    "本地 SQLite 缓存 + 增量更新，重复查看秒开；弹窗内可换排序/时间/刷新。"
+)
+__icon__ = "exteraPlugins/1"
+__desktop__ = True
+__desktop_os__ = "windows"
+
+DAYS_VALUES = ["1", "3", "7", "30", "365", "0"]
+DAYS_LABELS = ["最近 1 天", "最近 3 天", "最近 7 天",
+               "最近 30 天", "最近 1 年", "历史全部"]
+BY_VALUES = ["score", "reactions", "replies", "forwards", "views"]
+BY_LABELS = ["互动分", "点赞量", "回复数", "转发数", "浏览量"]
+SOURCE_LABELS = ["客户端直连（推荐）", "本地服务 8765（兜底）"]
+TOP_OPTIONS = [10, 15, 20, 30, 50, 100, 200, 500]
+
+DEFAULT_BACKEND = "http://127.0.0.1:8765"
+PAGE = 100
+PAGE_GAP = 0.35
+FRESH_SECONDS = 120          # 多久内不重复检查“有没有新消息”
+MAX_PAGES = 400              # 安全上限：单次补拉最多多少页
+PAGE_TIMEOUT = 20            # 单页请求超时（秒）
+SCAN_DEADLINE = 180          # 单次扫描总时限（秒），超时就用已拿到的
+PROGRESS_EVERY = 1.5         # 进度提示最小间隔（秒）
+SEP = "─────────────"
+
+W_REACTION, W_REPLY, W_FORWARD, W_VIEW, W_VIEW_CAP = 1, 1, 2, 0.05, 20
+
+
+def _clamp_idx(v, n):
+    try:
+        v = int(v)
+    except Exception:
+        v = 0
+    return 0 if v < 0 else (n - 1 if v >= n else v)
+
+
+def _f(obj, name, default=None):
+    try:
+        v = getattr(obj, name, default)
+        return default if v is None else v
+    except Exception:
+        return default
+
+
+class HotlistPlugin(BasePlugin):
+
+    # ---------------- 生命周期 ----------------
+
+    def on_plugin_load(self):
+        self._author_cache = {}
+        self._busy = set()                 # 正在扫描的 dialog_id（防重入）
+        self._busy_lock = threading.Lock()
+        self._last_prog = 0.0
+        try:
+            self._db_path = self._resolve_db_path()
+        except Exception:
+            self._db_path = None
+        # 一次性迁移：旧版把「弹窗里选的时间范围」写进了全局默认，导致换群沿用。
+        # 这里把“新群默认”重置为「最近 3 天」，各群的旧选择不受影响（新版按群存）。
+        try:
+            if not self.get_setting("pg_migrated", False):
+                self.set_setting("days", 1)          # 1 = 最近 3 天
+                self.set_setting("pg_migrated", True)
+        except Exception as e:
+            self.log("prefs migrate failed: %s" % e)
+        try:
+            self.add_menu_item(MenuItemData(
+                menu_type=MenuItemType.CHAT_ACTION_MENU,
+                text="🏆 热门消息榜", on_click=self._on_menu, priority=20))
+        except Exception as e:
+            self.log("add CHAT_ACTION_MENU failed: %s" % e)
+        try:
+            self.add_menu_item(MenuItemData(
+                menu_type=MenuItemType.DRAWER_MENU,
+                text="🏆 热门消息榜", on_click=self._on_menu, priority=20))
+        except Exception as e:
+            self.log("add DRAWER_MENU failed: %s" % e)
+
+    def create_settings(self):
+        return [
+            Header("热门消息榜"),
+            Text("用客户端自己已登录的会话直连读取，本地缓存+增量更新，"
+                 "同一群第二次看起秒开；直连失败会自动回退本地服务。"),
+            Divider(),
+            Selector("source", "数据来源", 0, SOURCE_LABELS,
+                     subtext="直连失败会自动回退本地服务"),
+            Selector("days", "时间范围（默认）", 1, DAYS_LABELS),
+            Selector("by", "排序方式（默认）", 0, BY_LABELS),
+            Input("top", "榜单条数（1–500）", "15",
+                  subtext="弹窗里也能快速切 Top 10/50/100/200 等"),
+            Input("limit", "扫描上限（条）", "3000",
+                  subtext="缓存里最多保留/参与排行的消息条数，可调大如 20000"),
+            Input("backend", "本地服务地址（兜底用）", DEFAULT_BACKEND,
+                  subtext="仅当数据来源=本地服务时使用"),
+            Divider(),
+            Text("用法：打开任意群组 → 右上角菜单 → 热门消息榜。"
+                 "弹窗里点条目跳原消息，顶部可换排序/时间/刷新。"),
+        ]
+
+    # ---------------- 设置 ----------------
+
+    def _int_setting(self, key, default):
+        try:
+            raw = self.get_setting(key, default)
+            if raw is None or raw == "":
+                return default
+            return int(raw)
+        except Exception:
+            return default
+
+    def _state(self, dialog_id=None):
+        src_i = _clamp_idx(self._int_setting("source", 0), len(SOURCE_LABELS))
+        if dialog_id is None:
+            days_i = _clamp_idx(self._int_setting("days", 1), len(DAYS_VALUES))
+        else:
+            days_i = self._days_idx(dialog_id)
+        by_i = _clamp_idx(self._int_setting("by", 0), len(BY_LABELS))
+        top = max(1, min(self._int_setting("top", 15), 500))
+        limit = max(100, min(self._int_setting("limit", 3000), 200000))
+        try:
+            backend = (self.get_setting("backend", DEFAULT_BACKEND) or "").strip()
+        except Exception:
+            backend = DEFAULT_BACKEND
+        backend = (backend or DEFAULT_BACKEND).rstrip("/")
+        if not backend.startswith("http"):
+            backend = "http://" + backend
+        return src_i, days_i, by_i, top, limit, backend
+
+    def _days_idx(self, dialog_id):
+        """每个群单独记住时间范围；首次打开用“默认时间范围”播种。"""
+        try:
+            con = self._db()
+            try:
+                row = con.execute(
+                    "SELECT days_idx FROM prefs WHERE dialog_id=?",
+                    (dialog_id,)).fetchone()
+                if row is not None:
+                    return _clamp_idx(row[0], len(DAYS_VALUES))
+                seed = _clamp_idx(self._int_setting("days", 1), len(DAYS_VALUES))
+                con.execute(
+                    "INSERT OR REPLACE INTO prefs(dialog_id,days_idx) VALUES(?,?)",
+                    (dialog_id, seed))
+                con.commit()
+                return seed
+            finally:
+                con.close()
+        except Exception as e:
+            self.log("days_idx failed: %s" % e)
+            return _clamp_idx(self._int_setting("days", 1), len(DAYS_VALUES))
+
+    def _set_by(self, idx):
+        try:
+            self.set_setting("by", int(idx))
+        except Exception as e:
+            self.log("set by failed: %s" % e)
+
+    def _set_days(self, dialog_id, idx):
+        """只改这个群的时间范围，不影响其它群。"""
+        try:
+            con = self._db()
+            try:
+                con.execute(
+                    "INSERT OR REPLACE INTO prefs(dialog_id,days_idx) VALUES(?,?)",
+                    (dialog_id, int(idx)))
+                con.commit()
+            finally:
+                con.close()
+        except Exception as e:
+            self.log("set days failed: %s" % e)
+
+    def _set_top(self, n):
+        try:
+            self.set_setting("top", int(n))
+        except Exception as e:
+            self.log("set top failed: %s" % e)
+
+    # ---------------- 缓存数据库 ----------------
+
+    def _resolve_db_path(self):
+        import file_utils
+        d = None
+        try:
+            d = file_utils.get_plugin_cache_dir()
+        except Exception:
+            d = None
+        if not d:
+            try:
+                d = file_utils.get_plugin_dir()
+            except Exception:
+                d = None
+        if not d:
+            return None
+        try:
+            os.makedirs(d, exist_ok=True)
+        except Exception:
+            pass
+        return os.path.join(d, "hotlist_cache.db")
+
+    def _db(self):
+        if not self._db_path:
+            self._db_path = self._resolve_db_path()
+        if not self._db_path:
+            raise RuntimeError("无法获得插件缓存目录")
+        con = sqlite3.connect(self._db_path, timeout=10, check_same_thread=False)
+        con.execute("""CREATE TABLE IF NOT EXISTS messages(
+            dialog_id INTEGER NOT NULL, msg_id INTEGER NOT NULL, date INTEGER,
+            text TEXT, reactions INTEGER, rdetail TEXT, replies INTEGER,
+            forwards INTEGER, views INTEGER, author TEXT, link TEXT, deep TEXT,
+            grouped_id INTEGER,
+            PRIMARY KEY(dialog_id, msg_id))""")
+        con.execute("""CREATE TABLE IF NOT EXISTS dialogs(
+            dialog_id INTEGER PRIMARY KEY, name TEXT, username TEXT,
+            bare_id INTEGER, kind TEXT, newest_id INTEGER, oldest_id INTEGER,
+            last_check INTEGER)""")
+        con.execute("""CREATE TABLE IF NOT EXISTS prefs(
+            dialog_id INTEGER PRIMARY KEY, days_idx INTEGER)""")
+        con.execute("CREATE INDEX IF NOT EXISTS ix_dd ON messages(dialog_id, date)")
+        # 兼容旧库：补 grouped_id 列
+        try:
+            con.execute("ALTER TABLE messages ADD COLUMN grouped_id INTEGER")
+        except Exception:
+            pass
+        con.commit()
+        return con
+
+    def _load_meta(self, con, dialog_id):
+        cur = con.execute(
+            "SELECT name,username,bare_id,kind,newest_id,oldest_id,last_check "
+            "FROM dialogs WHERE dialog_id=?", (dialog_id,))
+        row = cur.fetchone()
+        if not row:
+            return {"name": "", "username": "", "bare_id": None, "kind": "",
+                    "newest_id": 0, "oldest_id": 0, "last_check": 0}
+        return {"name": row[0] or "", "username": row[1] or "",
+                "bare_id": row[2], "kind": row[3] or "",
+                "newest_id": row[4] or 0, "oldest_id": row[5] or 0,
+                "last_check": row[6] or 0}
+
+    def _save_meta(self, con, dialog_id, meta):
+        con.execute(
+            "INSERT INTO dialogs(dialog_id,name,username,bare_id,kind,"
+            "newest_id,oldest_id,last_check) VALUES(?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(dialog_id) DO UPDATE SET name=excluded.name,"
+            "username=excluded.username,bare_id=excluded.bare_id,"
+            "kind=excluded.kind,newest_id=excluded.newest_id,"
+            "oldest_id=excluded.oldest_id,last_check=excluded.last_check",
+            (dialog_id, meta["name"], meta["username"], meta["bare_id"],
+             meta["kind"], meta["newest_id"], meta["oldest_id"],
+             meta["last_check"]))
+        con.commit()
+
+    def _stats(self, con, dialog_id):
+        row = con.execute(
+            "SELECT COUNT(*), MIN(date), MIN(msg_id) FROM messages WHERE dialog_id=?",
+            (dialog_id,)).fetchone()
+        return (row[0] or 0), (row[1] or 0), (row[2] or 0)
+
+    # ---------------- TL 消息 -> 行 ----------------
+
+    def _row(self, m, info):
+        mid = _f(m, "id", 0)
+        reacts, detail = self._reactions(m)
+        rep = _f(m, "replies", None)
+        replies = _f(rep, "replies", 0) or 0 if rep is not None else 0
+        fwd = _f(m, "forwards", 0) or 0
+        views = _f(m, "views", 0) or 0
+        text = _f(m, "message", "") or ""
+        d = _f(m, "date", 0) or 0
+        username = info.get("username")
+        bare = info.get("bare_id")
+        kind = info.get("kind") or info.get("type")
+        link = deep = None
+        if username:
+            link = "https://t.me/%s/%s" % (username, mid)
+            deep = "tg://resolve?domain=%s&post=%s" % (username, mid)
+        elif kind == "channel" and bare:
+            link = "https://t.me/c/%s/%s" % (bare, mid)
+            deep = "tg://privatepost?channel=%s&post=%s" % (bare, mid)
+        return (mid, int(d), text, reacts, detail, replies, fwd, views,
+                self._author(m), link, deep, _f(m, "grouped_id", None))
+
+    def _author(self, m):
+        try:
+            import tgnet_bridge
+            fid = _f(m, "from_id", None)
+            uid = _f(fid, "user_id", None) if fid is not None else None
+            if not uid:
+                return ""
+            if uid in self._author_cache:
+                return self._author_cache[uid]
+            info = tgnet_bridge.peer_info(int(uid)) or {}
+            name = info.get("name") or info.get("username") or ""
+            self._author_cache[uid] = name
+            return name
+        except Exception:
+            return ""
+
+    def _reactions(self, m):
+        r = _f(m, "reactions", None)
+        results = _f(r, "results", None) if r is not None else None
+        if not results:
+            return 0, ""
+        total = 0
+        parts = []
+        for rc in results:
+            c = _f(rc, "count", 0) or 0
+            total += c
+            reac = _f(rc, "reaction", None)
+            emo = _f(reac, "emoticon", None) if reac is not None else None
+            parts.append((emo or "★", c))
+        parts.sort(key=lambda x: -x[1])
+        return total, " ".join("%s×%d" % p for p in parts[:5])
+
+    # ---------------- 直连 + 缓存 ----------------
+
+    def _get_history_page(self, peer, offset_id, limit, min_id=0):
+        import tl_runtime
+        from client_utils import send_request
+        cls = None
+        for name in ("messages.getHistory", "TL_messages_getHistory"):
+            try:
+                cls = tl_runtime.lookup(name)
+            except Exception:
+                cls = None
+            if cls:
+                break
+        if cls is None:
+            cls = tl_runtime.TLRPC.TL_messages_getHistory
+        req = cls(peer=peer, offset_id=int(offset_id), offset_date=0,
+                  add_offset=0, limit=int(limit), max_id=0,
+                  min_id=int(min_id), hash=0)
+        box = {}
+        ev = threading.Event()
+
+        def cb(response, error):
+            box["r"] = response
+            box["e"] = error
+            ev.set()
+
+        send_request(req, cb)
+        if not ev.wait(PAGE_TIMEOUT):
+            raise RuntimeError("单页请求超时(%ds)" % PAGE_TIMEOUT)
+        if box.get("e"):
+            raise RuntimeError("接口错误: %s" % (box["e"],))
+        return list(getattr(box.get("r"), "messages", None) or [])
+
+    def _insert_page(self, con, dialog_id, info, tl_msgs):
+        n = 0
+        for m in tl_msgs:
+            if type(m).__name__ == "TL_messageService":
+                continue
+            row = self._row(m, info)
+            try:
+                con.execute(
+                    "INSERT OR REPLACE INTO messages(dialog_id,msg_id,date,text,"
+                    "reactions,rdetail,replies,forwards,views,author,link,deep,"
+                    "grouped_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (dialog_id,) + row)
+                n += 1
+            except Exception as e:
+                self.log("insert failed: %s" % e)
+        con.commit()
+        return n
+
+    def _direct_cached(self, dialog_id, days, limit, force):
+        import tgnet_bridge
+        info = tgnet_bridge.peer_info(dialog_id) or {}
+        peer = tgnet_bridge.get_input_peer(dialog_id)
+        con = self._db()
+        try:
+            meta = self._load_meta(con, dialog_id)
+            if not meta["name"]:
+                meta["name"] = info.get("name") or ""
+            meta["username"] = info.get("username") or meta.get("username") or ""
+            if info.get("bare_id"):
+                meta["bare_id"] = info.get("bare_id")
+            meta["kind"] = info.get("type") or meta.get("kind") or ""
+
+            cutoff = 0 if days == "0" else int(time.time() - float(days) * 86400)
+            deadline = time.time() + SCAN_DEADLINE
+            did_net = False
+
+            # 1) 增量拉新（仅当已有缓存；首次由下方深度扫描完成）
+            if meta["newest_id"] and (force or int(time.time()) - meta["last_check"] > FRESH_SECONDS):
+                start_newest = meta["newest_id"]
+                offset = 0
+                pages = 0
+                while pages < MAX_PAGES and time.time() < deadline:
+                    page = self._get_history_page(peer, offset, PAGE)
+                    if not page:
+                        break
+                    self._insert_page(con, dialog_id, info, page)
+                    did_net = True
+                    newest_in_page = _f(page[0], "id", 0)
+                    if newest_in_page and newest_in_page <= start_newest:
+                        break
+                    if len(page) < PAGE:
+                        break
+                    new_offset = _f(page[-1], "id", 0)
+                    if not new_offset or new_offset == offset:
+                        break
+                    offset = new_offset
+                    pages += 1
+                    self._progress(dialog_id)
+                    time.sleep(PAGE_GAP)
+
+            # 2) 补足深度：往更早翻，直到够 limit / 到时间下界 / 无更多
+            pages = 0
+            while pages < MAX_PAGES and time.time() < deadline:
+                cnt, oldest_date, oldest_id = self._stats(con, dialog_id)
+                if cnt >= limit:
+                    break
+                if cutoff and oldest_date and oldest_date <= cutoff:
+                    break
+                page = self._get_history_page(peer, oldest_id or 0, PAGE)
+                if not page:
+                    break
+                self._insert_page(con, dialog_id, info, page)
+                did_net = True
+                new_oldest = _f(page[-1], "id", 0) or 0
+                if new_oldest and (not oldest_id or new_oldest < oldest_id):
+                    meta["oldest_id"] = new_oldest
+                    self._save_meta(con, dialog_id, meta)
+                if new_oldest and new_oldest == oldest_id:
+                    break  # 没有前进，防止死循环
+                if len(page) < PAGE:
+                    break
+                pages += 1
+                self._progress(dialog_id)
+                time.sleep(PAGE_GAP)
+
+            if did_net:
+                row = con.execute(
+                    "SELECT MAX(msg_id),MIN(msg_id) FROM messages WHERE dialog_id=?",
+                    (dialog_id,)).fetchone()
+                if row and row[0]:
+                    meta["newest_id"] = row[0]
+                    meta["oldest_id"] = row[1]
+                meta["last_check"] = int(time.time())
+                self._save_meta(con, dialog_id, meta)
+
+            rows, n_alb = self._query(con, dialog_id, cutoff, limit)
+            out = self._meta_out(meta, days)
+            out["albums"] = n_alb
+            out["partial"] = time.time() >= deadline
+            return rows, out
+        finally:
+            con.close()
+
+    def _progress(self, dialog_id):
+        now = time.time()
+        if now - self._last_prog < PROGRESS_EVERY:
+            return
+        self._last_prog = now
+        try:
+            con = self._db()
+            try:
+                cnt, _, _ = self._stats(con, dialog_id)
+            finally:
+                con.close()
+            self._info("正在扫描历史消息… 已获取 %d 条" % cnt)
+        except Exception:
+            self._info("正在扫描历史消息…")
+
+    def _query(self, con, dialog_id, cutoff, limit):
+        sql = ("SELECT msg_id,date,text,reactions,rdetail,replies,forwards,"
+               "views,author,link,deep,grouped_id FROM messages WHERE dialog_id=?")
+        args = [dialog_id]
+        if cutoff:
+            sql += " AND date>=?"
+            args.append(cutoff)
+        sql += " ORDER BY date DESC LIMIT ?"
+        args.append(int(limit))
+        out = []
+        for r in con.execute(sql, args):
+            out.append({
+                "id": r[0], "date_ts": r[1], "text": r[2] or "",
+                "reactions": r[3] or 0, "detail": r[4] or "",
+                "replies": r[5] or 0, "forwards": r[6] or 0,
+                "views": r[7] or 0, "author": r[8] or "",
+                "link": r[9], "deep": r[10], "grouped_id": r[11],
+                "date": time.strftime("%m-%d %H:%M", time.localtime(r[1] or 0)),
+                "score": W_REACTION * (r[3] or 0) + W_REPLY * (r[5] or 0)
+                         + W_FORWARD * (r[6] or 0)
+                         + W_VIEW * min(r[7] or 0, W_VIEW_CAP),
+            })
+        merged, n_alb = self._merge_albums(out)
+        return merged, n_alb
+
+    def _merge_albums(self, rows):
+        """把同一相册(grouped_id)的多条媒体合并成一条：
+        文本取相册里最长的那条（通常是说明/caption）；反应、回复、转发、浏览取最大值
+        （相册各成员的这些数值相近或只挂在其中一条上，取最大避免重复累加）。"""
+        groups = {}
+        order = []
+        for r in rows:
+            gid = r.get("grouped_id")
+            key = ("g", gid) if gid else ("m", r["id"])
+            if key not in groups:
+                groups[key] = []
+                order.append(key)
+            groups[key].append(r)
+        out = []
+        n_alb = 0
+        for key in order:
+            members = groups[key]
+            if len(members) == 1:
+                out.append(members[0])
+                continue
+            n_alb += 1
+            # 代表：优先有文本的，其次反应多的
+            rep = max(members, key=lambda m: (
+                1 if m["text"] else 0, m["reactions"], m["id"]))
+            m0 = dict(rep)
+            m0["reactions"] = max(x["reactions"] for x in members)
+            m0["replies"] = max(x["replies"] for x in members)
+            m0["forwards"] = max(x["forwards"] for x in members)
+            m0["views"] = max(x["views"] for x in members)
+            m0["detail"] = next((x["detail"] for x in members if x["detail"]), "")
+            texts = [x["text"] for x in members if x["text"]]
+            m0["text"] = max(texts, key=len) if texts else ""
+            m0["score"] = (W_REACTION * m0["reactions"] + W_REPLY * m0["replies"]
+                           + W_FORWARD * m0["forwards"]
+                           + W_VIEW * min(m0["views"], W_VIEW_CAP))
+            out.append(m0)
+        return out, n_alb
+
+    def _meta_out(self, meta, days):
+        return {
+            "group": meta.get("name") or meta.get("username") or "当前群组",
+            "count": 0,  # 由调用处补
+            "all_time": days == "0",
+            "oldest": "",
+        }
+
+    def _read_cache_only(self, dialog_id, days, limit):
+        con = self._db()
+        try:
+            meta = self._load_meta(con, dialog_id)
+            cutoff = 0 if days == "0" else int(time.time() - float(days) * 86400)
+            rows, n_alb = self._query(con, dialog_id, cutoff, limit)
+            meta["albums"] = n_alb
+            return rows, meta
+        finally:
+            con.close()
+
+    # ---------------- 本地服务兜底 ----------------
+
+    def _fetch_backend(self, dialog_id, days, by, top, limit, backend, force):
+        url = ("%s/api/data?group=%d&days=%s&by=%s&top=%d&limit=%d&force=%d"
+               % (backend, dialog_id, days, by, top, limit, 1 if force else 0))
+        req = urllib.request.Request(url, headers={"User-Agent": "exDesktop-hotlist/3.0"})
+        with urllib.request.urlopen(req, timeout=900) as r:
+            data = json.loads(r.read().decode("utf-8"))
+        if not data.get("ok"):
+            raise RuntimeError(data.get("error") or "本地服务返回失败")
+        meta = data.get("meta") or {}
+        meta["via"] = "本地服务"
+        rows = []
+        for it in data.get("rank") or []:
+            rows.append({
+                "id": it.get("id"), "date_ts": 0,
+                "text": it.get("text", ""),
+                "reactions": it.get("reactions", 0),
+                "detail": it.get("reaction_detail", ""),
+                "replies": it.get("replies", 0),
+                "forwards": it.get("forwards", 0),
+                "views": it.get("views", 0),
+                "author": it.get("author", ""),
+                "link": it.get("link"), "deep": it.get("deep"),
+                "date": it.get("date", ""), "score": it.get("score", 0),
+            })
+        return rows, meta
+
+    # ---------------- 菜单 / 调度 ----------------
+
+    def _on_menu(self, context=None):
+        threading.Thread(target=self._run, args=(context,), daemon=True).start()
+
+    def _run(self, context):
+        try:
+            dialog_id = self._dialog_id(context)
+            if not dialog_id:
+                self._err("请先打开一个群组或频道，再点热门消息榜")
+                return
+            self._show(dialog_id, force=False)
+        except Exception as e:
+            self.log("_run failed: %s" % e)
+            self._err("出错了：%s" % e)
+
+    def _dialog_id(self, context):
+        try:
+            if isinstance(context, dict):
+                for key in ("dialog_id", "peer", "chat_id", "user_id"):
+                    v = context.get(key)
+                    if v:
+                        return int(v)
+        except Exception:
+            pass
+        try:
+            from client_utils import get_current_dialog_id
+            return int(get_current_dialog_id() or 0)
+        except Exception:
+            return 0
+
+    def _show(self, dialog_id, force):
+        with self._busy_lock:
+            if dialog_id in self._busy:
+                self._info("正在扫描中，请稍候…")
+                return
+            self._busy.add(dialog_id)
+        try:
+            self._show_impl(dialog_id, force)
+        finally:
+            with self._busy_lock:
+                self._busy.discard(dialog_id)
+
+    def _show_impl(self, dialog_id, force):
+        src_i, days_i, by_i, top, limit, backend = self._state(dialog_id)
+        days = DAYS_VALUES[days_i]
+        rows = meta = via = None
+
+        if src_i == 0:
+            try:
+                rows, meta = self._direct_cached(dialog_id, days, limit, force)
+                via = "直连"
+            except Exception as e:
+                self.log("direct failed, try cache/backend: %s" % e)
+                try:
+                    rows, m2 = self._read_cache_only(dialog_id, days, limit)
+                    if rows:
+                        meta = self._meta_out(m2, days)
+                        meta["albums"] = m2.get("albums", 0)
+                        via = "直连·离线缓存"
+                        self._info("直连失败，已显示本地缓存")
+                except Exception:
+                    rows = None
+
+        if rows is None:
+            try:
+                rows, meta = self._fetch_backend(
+                    dialog_id, days, BY_VALUES[by_i], top, limit, backend, force)
+                via = "本地服务"
+            except urllib.error.URLError as e:
+                self._err("直连失败，且本地服务未启动。\n请先双击 run_web.bat。\n(%s)" % e)
+                return
+            except Exception as e:
+                self.log("backend failed: %s" % e)
+                self._err("取数失败：%s" % e)
+                return
+
+        if meta is not None:
+            meta["count"] = len(rows)
+            meta.setdefault("albums", 0)
+            if rows:
+                meta["oldest"] = rows[-1]["date"]
+        self._render(dialog_id, rows, meta, days_i, by_i, top, limit, via)
+
+    # ---------------- 渲染 ----------------
+
+    def _sort_key(self, by):
+        return {
+            "score": lambda x: x["score"],
+            "reactions": lambda x: x["reactions"],
+            "replies": lambda x: x["replies"],
+            "forwards": lambda x: x["forwards"],
+            "views": lambda x: x["views"],
+        }[by]
+
+    def _line(self, rank, it):
+        bits = []
+        if it["reactions"]:
+            bits.append("👍%d" % it["reactions"])
+        if it["replies"]:
+            bits.append("💬%d" % it["replies"])
+        if it["forwards"]:
+            bits.append("↗%d" % it["forwards"])
+        if it["views"]:
+            bits.append("👁%d" % it["views"])
+        stat = " ".join(bits) or "-"
+        text = " ".join(str(it.get("text") or "[消息]").split())
+        if len(text) > 38:
+            text = text[:38] + "…"
+        return "#%d %s %s" % (rank, stat, text)
+
+    def _render(self, dialog_id, rows, meta, days_i, by_i, top, limit, via):
+        by = BY_VALUES[by_i]
+        ranked = sorted(rows, key=self._sort_key(by), reverse=True)[:top]
+        if not ranked:
+            self._err("该时间范围内没有消息")
+            return
+        items = [
+            "🔄 刷新数据（只拉新消息）",
+            "🔀 排序：%s" % BY_LABELS[by_i],
+            "📅 时间：%s" % DAYS_LABELS[days_i],
+            "🏆 条数：Top %d" % top,
+            SEP,
+        ]
+        items.extend(self._line(i + 1, it) for i, it in enumerate(ranked))
+        links = [it.get("deep") or it.get("link") or "" for it in ranked]
+
+        group = (meta or {}).get("group") or "热门消息榜"
+        title = "%s · %s Top %d" % (group, BY_LABELS[by_i], len(ranked))
+        when = "全部历史" if (meta or {}).get("all_time") else (
+            ("最早 " + (meta or {}).get("oldest", "")) if (meta or {}).get("oldest") else "")
+        alb = (meta or {}).get("albums", 0)
+        alb_note = ("，%d 个相册已合并" % alb) if alb else ""
+        message = "来源：%s · 共 %d 条%s（上限 %d）· %s\n点击条目打开原消息" % (
+            via, (meta or {}).get("count", len(rows)), alb_note, limit, when)
+        if (meta or {}).get("partial"):
+            message += "\n⚠ 已达单次扫描时限，先显示已抓到的；再次打开会继续补拉"
+
+        def on_click(builder, which):
+            try:
+                try:
+                    builder.dismiss()
+                except Exception:
+                    pass
+                if which == 0:
+                    threading.Thread(target=self._show,
+                                     args=(dialog_id, True), daemon=True).start()
+                elif which == 1:
+                    self._pick_sort(dialog_id)
+                elif which == 2:
+                    self._pick_days(dialog_id)
+                elif which == 3:
+                    self._pick_top(dialog_id)
+                elif which == 4:
+                    pass
+                elif which >= 5:
+                    idx = which - 5
+                    if 0 <= idx < len(links) and links[idx]:
+                        self._open(links[idx])
+            except Exception as e:
+                self.log("on_click failed: %s" % e)
+
+        def build():
+            from ui.alert import AlertDialogBuilder
+            AlertDialogBuilder() \
+                .set_title(title).set_message(message) \
+                .set_items(items, on_click) \
+                .set_positive_button("刷新", lambda b, w: on_click(b, 0)) \
+                .set_negative_button("关闭").show()
+        self._ui(build)
+
+    def _pick_sort(self, dialog_id):
+        def on_pick(builder, which):
+            try:
+                builder.dismiss()
+            except Exception:
+                pass
+            self._set_by(which)
+            threading.Thread(target=self._show,
+                             args=(dialog_id, False), daemon=True).start()
+
+        def build():
+            from ui.alert import AlertDialogBuilder
+            AlertDialogBuilder().set_title("排序方式").set_items(BY_LABELS, on_pick) \
+                .set_negative_button("取消").show()
+        self._ui(build)
+
+    def _pick_days(self, dialog_id):
+        def on_pick(builder, which):
+            try:
+                builder.dismiss()
+            except Exception:
+                pass
+            self._set_days(dialog_id, which)
+            threading.Thread(target=self._show,
+                             args=(dialog_id, False), daemon=True).start()
+
+        def build():
+            from ui.alert import AlertDialogBuilder
+            AlertDialogBuilder().set_title("时间范围（仅当前群）") \
+                .set_message("只对这个群生效；其它群各自记忆，新群默认最近 3 天") \
+                .set_items(DAYS_LABELS, on_pick).set_negative_button("取消").show()
+        self._ui(build)
+
+    def _pick_top(self, dialog_id):
+        labels = ["Top %d" % n for n in TOP_OPTIONS]
+
+        def on_pick(builder, which):
+            try:
+                builder.dismiss()
+            except Exception:
+                pass
+            if 0 <= which < len(TOP_OPTIONS):
+                self._set_top(TOP_OPTIONS[which])
+            threading.Thread(target=self._show,
+                             args=(dialog_id, False), daemon=True).start()
+
+        def build():
+            from ui.alert import AlertDialogBuilder
+            AlertDialogBuilder().set_title("榜单条数") \
+                .set_message("也可在插件设置里填任意数字（1–500）") \
+                .set_items(labels, on_pick).set_negative_button("取消").show()
+        self._ui(build)
+
+    # ---------------- 工具 ----------------
+
+    def _ui(self, fn):
+        try:
+            from android_utils import run_on_ui_thread
+            run_on_ui_thread(fn)
+        except Exception:
+            try:
+                fn()
+            except Exception as e:
+                self.log("ui build failed: %s" % e)
+
+    def _open(self, url):
+        try:
+            from hook_utils import find_class
+            find_class("org.telegram.messenger.browser.Browser").openUrl(None, url)
+            return
+        except Exception as e:
+            self.log("openUrl failed: %s" % e)
+        try:
+            from android_utils import copy_to_clipboard
+            copy_to_clipboard(url)
+            self._info("已复制消息链接，可粘贴打开")
+        except Exception as e:
+            self.log("copy failed: %s" % e)
+
+    def _err(self, msg):
+        try:
+            from ui.bulletin import BulletinHelper
+            BulletinHelper.show_error(msg)
+        except Exception:
+            self.log("ERR: %s" % msg)
+
+    def _info(self, msg):
+        try:
+            from ui.bulletin import BulletinHelper
+            BulletinHelper.show_info(msg)
+        except Exception:
+            self.log("INFO: %s" % msg)

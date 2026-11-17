@@ -1,0 +1,9 @@
+# tg-hotlist 运行依赖（.venv 里已离线装好，换机器时才需要重新装）
+
+telethon>=1.36
+tdata-reader>=0.1.0
+python-socks>=3.2.1
+segno>=1.6.6
+
+# telethon 的传递依赖（pip 会自动装）：
+#   pyaes / rsa / pyasn1

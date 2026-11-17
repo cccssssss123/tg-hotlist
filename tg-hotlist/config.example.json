@@ -1,0 +1,22 @@
+{
+    "api_id": 0,
+    "api_hash": "",
+    "phone": "",
+    "proxy": null,
+    "client_exe": "",
+    "open_mode": "browser",
+    "defaults": {
+        "group": "",
+        "days": 3,
+        "top": 20,
+        "limit": 5000,
+        "by": "score",
+        "weights": {
+            "reaction": 1,
+            "reply": 1,
+            "forward": 2,
+            "view": 0.05,
+            "view_cap": 20
+        }
+    }
+}

@@ -1,0 +1,34 @@
+# ---- 只跟踪本项目：默认忽略一切，再白名单放行 ----
+/*
+!/.gitignore
+!/README.md
+!/README.en.md
+!/LICENSE
+!/THIRD-PARTY-NOTICES.md
+!/.github/
+!/tg-hotlist/
+!/exdesktop/
+
+# 通用
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+
+# tg-hotlist 运行产物 / 敏感文件（登录会话、你的配置、日志、导出）
+tg-hotlist/.venv/
+tg-hotlist/__pycache__/
+tg-hotlist/output/
+tg-hotlist/session_backup_ayu/
+tg-hotlist/wheels/
+tg-hotlist/*.session
+tg-hotlist/tdata_import.json
+tg-hotlist/config.json
+tg-hotlist/backend.log
+tg-hotlist/qr_login.svg
+
+# exdesktop：客户端本体（260MB+）与运行数据不入库
+exdesktop/app/
+exdesktop/backup_before_update/
+exdesktop/__pycache__/
+exdesktop/.edge-panel/

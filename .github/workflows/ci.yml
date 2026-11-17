@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r tg-hotlist/requirements.txt
+
+      - name: Syntax check (all Python + plugin)
+        run: |
+          python -m py_compile tg-hotlist/tg_hotlist.py \
+                                tg-hotlist/web_app.py \
+                                tg-hotlist/import_tdata.py \
+                                tg-hotlist/periodic_likes.py
+          python -m py_compile exdesktop/hotlist.plugin
+
+      - name: Offline core tests
+        working-directory: tg-hotlist
+        run: python test_offline.py
+
+      - name: Plugin cache / incremental / album-merge tests
+        run: python exdesktop/test_cache.py
+
+      - name: Plugin dialog tests (auto-skips without backend)
+        run: python exdesktop/test_plugin.py

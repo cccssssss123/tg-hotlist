@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tg-hotlist · 本地浏览与互动榜</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<!-- ============ 登录层 ============ -->
+<div id="login" class="overlay hidden">
+  <div class="login-card">
+    <div class="login-head">
+      <div class="logo">📊</div>
+      <h1>tg-hotlist</h1>
+      <p class="sub">本地浏览与互动榜 · 只读，不改动任何聊天数据</p>
+    </div>
+
+    <div class="login-section">
+      <h2>方式一 · 扫码登录 <span class="badge-rec">推荐</span></h2>
+      <p class="hint">手机 Telegram → <b>设置 → 设备 → 连接桌面设备</b> → 扫描下方二维码。<br>不需要 my.telegram.org，也不需要短信验证码。</p>
+      <div id="qrBox" class="qr-box"><div class="qr-placeholder">正在生成二维码…</div></div>
+      <div id="qrMsg" class="qr-msg">等待扫码…</div>
+      <div class="row">
+        <button id="btnQrRefresh" class="btn ghost">刷新二维码</button>
+        <span id="qrUrlHint" class="hint-inline"></span>
+      </div>
+    </div>
+
+    <div class="login-divider"><span>或</span></div>
+
+    <div class="login-section">
+      <h2>方式二 · 从 AyuGram 的 tdata 导入</h2>
+      <p class="hint">复用已登录的桌面客户端凭证，同样不需要验证码。</p>
+      <div class="row">
+        <input id="tdataPath" class="input grow" placeholder='C:/Users/你/Downloads/AyuGram/tdata'>
+      </div>
+      <div class="row">
+        <input id="tdataPass" class="input" type="password" placeholder="本地密码（没设置就留空）" style="width:240px">
+        <button id="btnTdata" class="btn">导入</button>
+      </div>
+      <pre id="tdataLog" class="log hidden"></pre>
+    </div>
+
+    <div id="loginErr" class="err hidden"></div>
+  </div>
+</div>
+
+<!-- ============ 主界面 ============ -->
+<div id="app" class="app hidden">
+  <header class="topbar">
+    <div class="brand"><span class="logo-sm">📊</span> tg-hotlist</div>
+    <div class="topbar-mid" id="metaBar">请选择左侧的一个群组</div>
+    <div class="topbar-right">
+      <span id="userChip" class="chip"></span>
+      <button id="btnLogout" class="btn ghost small">退出</button>
+    </div>
+  </header>
+
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="side-head">
+        <input id="chatSearch" class="input" placeholder="搜索群组 / 频道…">
+        <div id="chatCount" class="side-count"></div>
+      </div>
+      <div id="chatList" class="chat-list"><div class="muted pad">加载中…</div></div>
+    </aside>
+
+    <main class="main">
+      <div class="toolbar">
+        <div class="field"><label>时间范围</label>
+          <select id="days" class="input">
+            <option value="1">最近 1 天</option>
+            <option value="2">最近 2 天</option>
+            <option value="3" selected>最近 3 天</option>
+            <option value="7">最近 7 天</option>
+            <option value="30">最近 30 天</option>
+            <option value="365">最近 1 年</option>
+            <option value="0">历史全部</option>
+          </select>
+        </div>
+        <div class="field"><label>排序方式</label>
+          <select id="by" class="input">
+            <option value="score" selected>互动分</option>
+            <option value="reactions">点赞量</option>
+            <option value="replies">回复数</option>
+            <option value="forwards">转发数</option>
+            <option value="views">浏览量</option>
+          </select>
+        </div>
+        <div class="field narrow"><label>条数</label>
+          <input id="topN" class="input" type="number" min="1" max="200" value="20">
+        </div>
+        <div class="field narrow"><label>扫描上限</label>
+          <input id="limitN" class="input" type="number" min="100" max="200000" step="100" value="5000">
+        </div>
+        <button id="btnLoad" class="btn primary">加载榜单</button>
+        <button id="btnForce" class="btn ghost" title="忽略缓存，重新从 Telegram 拉取">强制刷新</button>
+        <span class="spacer"></span>
+        <button id="btnMd" class="btn ghost">导出 MD</button>
+        <button id="btnHtml" class="btn ghost">导出 HTML</button>
+      </div>
+
+      <div class="tabs">
+        <button class="tab active" data-tab="rank">🏆 互动榜</button>
+        <button class="tab" data-tab="feed">💬 消息流</button>
+        <span id="fetchInfo" class="fetch-info"></span>
+      </div>
+
+      <div id="warn" class="warn hidden"></div>
+      <div id="err" class="err hidden"></div>
+      <div id="loading" class="loading hidden">正在从 Telegram 拉取消息，请稍候…</div>
+
+      <div id="panelRank" class="panel"></div>
+      <div id="panelFeed" class="panel hidden"></div>
+    </main>
+  </div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>
